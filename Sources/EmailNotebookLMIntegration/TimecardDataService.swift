@@ -19,9 +19,11 @@ final class TimecardDataService: ObservableObject {
             try await requestCalendarAccess()
             let endExclusive = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: end)) ?? end
             let predicate = eventStore.predicateForEvents(withStart: start, end: endExclusive, calendars: nil)
-            calendarEntries = eventStore.events(matching: predicate).map { event in
-                TimecardEntry(
-                    id: event.eventIdentifier ?? UUID().uuidString,
+            calendarEntries = eventStore.events(matching: predicate).enumerated().map { index, event in
+                let eventIdentifier = event.eventIdentifier ?? "calendar-event"
+                let occurrence = Int(event.startDate.timeIntervalSince1970)
+                return TimecardEntry(
+                    id: "\(eventIdentifier)-\(occurrence)-\(index)",
                     kind: .calendar,
                     title: event.title ?? "Untitled event",
                     date: event.startDate,
@@ -62,29 +64,35 @@ private enum SentMailFetcher {
             set rangeStart to anchorDate + (\(startOffset))
             set rangeEnd to anchorDate + (\(endOffset))
             set outputRows to {}
+            set foundSentMailbox to false
             tell application "Mail"
                 repeat with anAccount in every account
                     repeat with aMailbox in every mailbox of anAccount
+                        set mailboxName to name of (contents of aMailbox)
+                        set isSentMailbox to mailboxName is "Sent Items" or mailboxName is "Sent" or mailboxName is "Sent Messages"
                         try
-                            if (mailbox type of aMailbox) is sent then
-                                set matchingMessages to every message of aMailbox whose date sent is greater than or equal to rangeStart and date sent is less than rangeEnd
-                                repeat with aMessage in matchingMessages
-                                    set sentAt to date sent of aMessage
-                                    set sentYear to year of sentAt as integer
-                                    set sentMonth to my twoDigits(month of sentAt as integer)
-                                    set sentDay to my twoDigits(day of sentAt as integer)
-                                    set sentHour to my twoDigits(hours of sentAt as integer)
-                                    set sentMinute to my twoDigits(minutes of sentAt as integer)
-                                    set sentSecond to my twoDigits(seconds of sentAt as integer)
-                                    set sentTimestamp to (sentYear as text) & "-" & sentMonth & "-" & sentDay & "T" & sentHour & ":" & sentMinute & ":" & sentSecond
-                                    set messageId to my cleanField((message id of aMessage) as text)
-                                    set messageSubject to my cleanField((subject of aMessage) as text)
-                                    set end of outputRows to messageId & tab & sentTimestamp & tab & messageSubject
-                                end repeat
-                            end if
+                            if (mailbox type of aMailbox) is sent then set isSentMailbox to true
                         end try
+                        if isSentMailbox then
+                            set foundSentMailbox to true
+                            set matchingMessages to every message of aMailbox whose date sent is greater than or equal to rangeStart and date sent is less than rangeEnd
+                            repeat with aMessage in matchingMessages
+                                set sentAt to date sent of aMessage
+                                set sentYear to year of sentAt as integer
+                                set sentMonth to my twoDigits(month of sentAt as integer)
+                                set sentDay to my twoDigits(day of sentAt as integer)
+                                set sentHour to my twoDigits(hours of sentAt as integer)
+                                set sentMinute to my twoDigits(minutes of sentAt as integer)
+                                set sentSecond to my twoDigits(seconds of sentAt as integer)
+                                set sentTimestamp to (sentYear as text) & "-" & sentMonth & "-" & sentDay & "T" & sentHour & ":" & sentMinute & ":" & sentSecond
+                                set messageId to my cleanField((message id of aMessage) as text)
+                                set messageSubject to my cleanField((subject of aMessage) as text)
+                                set end of outputRows to messageId & tab & sentTimestamp & tab & messageSubject
+                            end repeat
+                        end if
                     end repeat
                 end repeat
+                if foundSentMailbox is false then error "No Sent mailbox was found. Expected a Sent Items, Sent, or Sent Messages mailbox."
             end tell
             set AppleScript's text item delimiters to return
             return outputRows as text
@@ -119,7 +127,11 @@ private enum SentMailFetcher {
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         dateFormatter.timeZone = .current
         dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        return (result.stringValue ?? "").components(separatedBy: "\n").compactMap { row in
+        let rows = (result.stringValue ?? "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        return rows.compactMap { row in
             let fields = row.components(separatedBy: "\t")
             guard fields.count >= 3, let sentAt = dateFormatter.date(from: fields[1]) else { return nil }
             return TimecardEntry(

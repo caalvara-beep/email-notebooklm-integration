@@ -12,6 +12,7 @@ struct TimecardsView: View {
     @State private var isManagingProjects = false
     @State private var draftProject = ""
     @State private var reportText = ""
+    @State private var showingReport = false
     @State private var statusMessage = "Choose a period, then load its activity."
 
     init() {
@@ -75,27 +76,32 @@ struct TimecardsView: View {
                     .tabItem { Label("Sent Emails", systemImage: "paperplane") }
             }
 
-            if canGenerateReport {
+            if hasLoaded {
                 HStack {
+                    Text(reportReadinessMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Generate timecards report", systemImage: "doc.text") {
+                    Button("Create report", systemImage: "doc.text") {
                         reportText = TimecardReport.make(
                             entries: calendarEntries + emailEntries,
                             projects: projects,
                             start: periodStart,
                             end: periodEnd
                         )
+                        showingReport = true
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canGenerateReport)
                 }
-            }
-
-            if !reportText.isEmpty {
-                reportPreview
             }
         }
         .padding(22)
         .frame(minWidth: 820, minHeight: 700)
+        .sheet(isPresented: $showingReport) {
+            reportPreview
+                .frame(minWidth: 680, minHeight: 500)
+        }
         .onChange(of: projects) { _, newProjects in
             try? TimecardProjectStore.save(newProjects)
         }
@@ -201,17 +207,27 @@ struct TimecardsView: View {
     }
 
     private func projectPicker(selection: Binding<String?>) -> some View {
-        Picker("Project", selection: Binding(
-            get: { selection.wrappedValue ?? "" },
-            set: { selection.wrappedValue = $0.isEmpty ? nil : $0 }
-        )) {
-            Text("Choose project").tag("")
-            ForEach(projects, id: \.self) { project in
-                Text(project).tag(project)
+        Menu {
+            Button("Unassigned") {
+                selection.wrappedValue = nil
             }
+            Divider()
+            ForEach(projects, id: \.self) { project in
+                Button {
+                    selection.wrappedValue = project
+                } label: {
+                    if selection.wrappedValue == project {
+                        Label(project, systemImage: "checkmark")
+                    } else {
+                        Text(project)
+                    }
+                }
+            }
+        } label: {
+            Label(selection.wrappedValue ?? "Choose project", systemImage: "chevron.down")
+                .frame(minWidth: 170, alignment: .leading)
         }
-        .pickerStyle(.menu)
-        .frame(minWidth: 170, alignment: .trailing)
+        .buttonStyle(.bordered)
     }
 
     private var projectEditor: some View {
@@ -251,6 +267,9 @@ struct TimecardsView: View {
                     .font(.headline)
                 Spacer()
                 Button("Download text file", systemImage: "square.and.arrow.down", action: saveReport)
+                Button("Done") {
+                    showingReport = false
+                }
             }
             TextEditor(text: $reportText)
                 .font(.system(.body, design: .monospaced))
@@ -263,6 +282,18 @@ struct TimecardsView: View {
         guard hasLoaded else { return false }
         let includedEntries = (calendarEntries + emailEntries).filter { !$0.excluded }
         return !includedEntries.isEmpty && includedEntries.allSatisfy { $0.project != nil }
+    }
+
+    private var reportReadinessMessage: String {
+        let includedEntries = (calendarEntries + emailEntries).filter { !$0.excluded }
+        let unassignedCount = includedEntries.filter { $0.project == nil }.count
+        if includedEntries.isEmpty {
+            return "No included activity to report."
+        }
+        if unassignedCount > 0 {
+            return "Assign a project or exclude each of the \(unassignedCount) remaining items."
+        }
+        return "All included activity is assigned."
     }
 
     private func projectBinding(at index: Int) -> Binding<String> {
