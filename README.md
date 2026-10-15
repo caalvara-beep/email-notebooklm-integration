@@ -29,6 +29,8 @@ Choose **Timecards Reports** from the home screen, select a start and end date, 
 
 Projects are seeded from mailbox mapping names and include `Internal` and `Time-off`; edit or add projects in the Timecards view. Assign a project to every included event and sent message, or mark entries excluded, to generate the report. The report groups totals Sunday through Saturday by project, groups same-subject emails per day, previews in the app, and can be saved as a UTF-8 text file.
 
+Calendar project assignments are saved by calendar-item series, so recurring events are pre-assigned on later loads. The report preview shows one weekly project-by-day table per week. Use a row's notes button to review or copy notes by day, or copy all notes for that project and week. Report generation shows progress before opening the preview.
+
 ## Mailbox names
 
 Use the account and mailbox names as shown in Apple Mail. Mailbox names are currently matched within the selected account. Add separate mappings for mailboxes that should go to different destination folders.

@@ -13,6 +13,9 @@ struct TimecardsView: View {
     @State private var draftProject = ""
     @State private var reportText = ""
     @State private var showingReport = false
+    @State private var isGeneratingReport = false
+    @State private var reportProgress = 0.0
+    @State private var selectedActivity: ActivitySection = .calendar
     @State private var statusMessage = "Choose a period, then load its activity."
 
     init() {
@@ -27,6 +30,23 @@ struct TimecardsView: View {
     }
 
     var body: some View {
+        Group {
+            if showingReport {
+                reportPreview
+            } else {
+                editorContent
+            }
+        }
+        .frame(minWidth: 820, minHeight: 700)
+        .onChange(of: projects) { _, newProjects in
+            try? TimecardProjectStore.save(newProjects)
+        }
+        .onChange(of: calendarEntries) { _, newEntries in
+            try? CalendarProjectAssignments.save(newEntries)
+        }
+    }
+
+    private var editorContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -69,12 +89,21 @@ struct TimecardsView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-            TabView {
-                calendarTab
-                    .tabItem { Label("Calendar", systemImage: "calendar") }
-                emailTab
-                    .tabItem { Label("Sent Emails", systemImage: "paperplane") }
+            VStack(spacing: 8) {
+                if selectedActivity == .calendar {
+                    calendarTab
+                } else {
+                    emailTab
+                }
+                Picker("Activity", selection: $selectedActivity) {
+                    Label("Calendar (\(calendarEntries.count))", systemImage: "calendar")
+                        .tag(ActivitySection.calendar)
+                    Label("Sent Emails (\(emailEntries.count))", systemImage: "paperplane")
+                        .tag(ActivitySection.sentEmails)
+                }
+                .pickerStyle(.segmented)
             }
+            .frame(maxHeight: .infinity)
 
             if hasLoaded {
                 HStack {
@@ -83,28 +112,23 @@ struct TimecardsView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("Create report", systemImage: "doc.text") {
-                        reportText = TimecardReport.make(
-                            entries: calendarEntries + emailEntries,
-                            projects: projects,
-                            start: periodStart,
-                            end: periodEnd
-                        )
-                        showingReport = true
+                        Task { await generateReport() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canGenerateReport)
+                    .disabled(!canGenerateReport || isGeneratingReport)
+                }
+            }
+
+            if isGeneratingReport {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Preparing timecards report…")
+                        .font(.callout)
+                    ProgressView(value: reportProgress)
+                        .progressViewStyle(.linear)
                 }
             }
         }
         .padding(22)
-        .frame(minWidth: 820, minHeight: 700)
-        .sheet(isPresented: $showingReport) {
-            reportPreview
-                .frame(minWidth: 680, minHeight: 500)
-        }
-        .onChange(of: projects) { _, newProjects in
-            try? TimecardProjectStore.save(newProjects)
-        }
     }
 
     private var calendarTab: some View {
@@ -240,7 +264,7 @@ struct TimecardsView: View {
                         .textFieldStyle(.roundedBorder)
                     if !["Internal", "Time-off"].contains(projects[index]) {
                         Button(role: .destructive) {
-                            projects.remove(at: index)
+                            removeProject(projects[index])
                         } label: {
                             Image(systemName: "trash")
                         }
@@ -261,21 +285,14 @@ struct TimecardsView: View {
     }
 
     private var reportPreview: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Report preview")
-                    .font(.headline)
-                Spacer()
-                Button("Download text file", systemImage: "square.and.arrow.down", action: saveReport)
-                Button("Done") {
-                    showingReport = false
-                }
-            }
-            TextEditor(text: $reportText)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 220)
-                .border(Color.gray.opacity(0.4))
-        }
+        TimecardReportPreview(
+            entries: calendarEntries + emailEntries,
+            projects: projects,
+            start: periodStart,
+            end: periodEnd,
+            onDownload: saveReport,
+            onReturn: { showingReport = false }
+        )
     }
 
     private var canGenerateReport: Bool {
@@ -319,6 +336,16 @@ struct TimecardsView: View {
         draftProject = ""
     }
 
+    private func removeProject(_ project: String) {
+        projects.removeAll { $0 == project }
+        for index in calendarEntries.indices where calendarEntries[index].project == project {
+            calendarEntries[index].project = nil
+        }
+        for index in emailEntries.indices where emailEntries[index].project == project {
+            emailEntries[index].project = nil
+        }
+    }
+
     private func loadActivity() {
         let start = Calendar.current.startOfDay(for: periodStart)
         let end = Calendar.current.startOfDay(for: periodEnd)
@@ -327,7 +354,14 @@ struct TimecardsView: View {
         statusMessage = "Loading Calendar events and sent email…"
         Task {
             await dataService.load(start: start, end: end)
-            calendarEntries = dataService.calendarEntries
+            let savedAssignments = CalendarProjectAssignments.load()
+            calendarEntries = dataService.calendarEntries.map { entry in
+                var entry = entry
+                if let key = entry.assignmentKey {
+                    entry.project = savedAssignments[key]
+                }
+                return entry
+            }
             emailEntries = dataService.emailEntries
             hasLoaded = dataService.errorMessage == nil
             if let errorMessage = dataService.errorMessage {
@@ -336,6 +370,28 @@ struct TimecardsView: View {
                 statusMessage = "Loaded \(calendarEntries.count) calendar events and \(emailEntries.count) sent emails."
             }
         }
+    }
+
+    @MainActor
+    private func generateReport() async {
+        guard canGenerateReport else { return }
+        isGeneratingReport = true
+        reportProgress = 0.1
+        let entries = calendarEntries + emailEntries
+        let reportProjects = projects
+        let start = periodStart
+        let end = periodEnd
+        await Task.yield()
+        reportProgress = 0.25
+        let generatedText = await Task.detached(priority: .userInitiated) {
+            TimecardReport.make(entries: entries, projects: reportProjects, start: start, end: end)
+        }.value
+        reportProgress = 0.85
+        reportText = generatedText
+        await Task.yield()
+        reportProgress = 1
+        isGeneratingReport = false
+        showingReport = true
     }
 
     private func saveReport() {
@@ -351,6 +407,11 @@ struct TimecardsView: View {
             statusMessage = "Could not save report: \(error.localizedDescription)"
         }
     }
+}
+
+private enum ActivitySection: Hashable {
+    case calendar
+    case sentEmails
 }
 
 private enum TimecardProjectStore {
@@ -374,5 +435,31 @@ private enum TimecardProjectStore {
         var seen: Set<String> = []
         return values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+}
+
+private enum CalendarProjectAssignments {
+    private static let fileURL = ConfigurationStore.directory.appending(path: "calendar-project-assignments.json")
+
+    static func load() -> [String: String] {
+        guard let data = try? Data(contentsOf: fileURL),
+              let assignments = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return assignments
+    }
+
+    static func save(_ entries: [TimecardEntry]) throws {
+        var assignments = load()
+        for entry in entries where entry.kind == .calendar {
+            guard let key = entry.assignmentKey else { continue }
+            if let project = entry.project {
+                assignments[key] = project
+            } else {
+                assignments.removeValue(forKey: key)
+            }
+        }
+        try FileManager.default.createDirectory(at: ConfigurationStore.directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(assignments).write(to: fileURL, options: .atomic)
     }
 }

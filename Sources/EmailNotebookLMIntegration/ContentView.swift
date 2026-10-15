@@ -11,6 +11,8 @@ struct EmailSyncView: View {
     @State private var draftDestination = ""
     @State private var editingMappingIDs: Set<UUID> = []
     @State private var isAddingMapping = false
+    @State private var scheduleIsLoaded = false
+    @State private var lastSyncDates: [UUID: Date] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -45,6 +47,17 @@ struct EmailSyncView: View {
                         }
                     }
                     .disabled(!configuration.scheduleEnabled)
+                    HStack {
+                        Image(systemName: scheduleStatusIcon)
+                            .foregroundStyle(scheduleIsLoaded ? .green : .secondary)
+                        Text(scheduleStatusText)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Check status", systemImage: "arrow.clockwise") {
+                            refreshStatus()
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -60,6 +73,9 @@ struct EmailSyncView: View {
         }
         .onChange(of: configuration.frequency) { _, _ in
             updateSchedule()
+        }
+        .onAppear {
+            refreshStatus()
         }
     }
 
@@ -119,6 +135,9 @@ struct EmailSyncView: View {
                     Text("\(mapping.wrappedValue.accountName) · \(mapping.wrappedValue.mailboxName)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text(lastSyncDescription(for: mapping.wrappedValue.id))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(isEditing ? "Done" : "Edit", systemImage: isEditing ? "checkmark" : "pencil") {
@@ -161,7 +180,7 @@ struct EmailSyncView: View {
                     Image(systemName: "folder")
                 }
                 .help("Choose destination folder")
-                Button("Add", systemImage: "plus", action: addMapping)
+                Button("Save", systemImage: "checkmark", action: addMapping)
                     .disabled(draftLabel.isEmpty || draftAccount.isEmpty || draftMailbox.isEmpty || draftDestination.isEmpty)
             }
         }
@@ -198,6 +217,41 @@ struct EmailSyncView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var scheduleStatusIcon: String {
+        if scheduleIsLoaded { return "checkmark.circle.fill" }
+        return configuration.scheduleEnabled ? "exclamationmark.circle.fill" : "pause.circle"
+    }
+
+    private var scheduleStatusText: String {
+        if configuration.scheduleEnabled {
+            return scheduleIsLoaded ? "Automatic export is loaded in launchd." : "Enabled in settings, but no launchd job is loaded."
+        }
+        return scheduleIsLoaded ? "A launchd job is loaded, but automatic export is switched off." : "Automatic export is off."
+    }
+
+    private func lastSyncDescription(for mappingID: UUID) -> String {
+        guard let date = lastSyncDates[mappingID] else { return "Last successful sync: never" }
+        return "Last successful sync: \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func refreshLastSyncDates() {
+        var dates: [UUID: Date] = [:]
+        for mapping in configuration.mappings where !mapping.destinationPath.isEmpty {
+            let checkpoint = URL(fileURLWithPath: mapping.destinationPath, isDirectory: true)
+                .appending(path: ".\(mapping.id.uuidString).last-successful-run.txt")
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: checkpoint.path),
+               let modifiedAt = attributes[.modificationDate] as? Date {
+                dates[mapping.id] = modifiedAt
+            }
+        }
+        lastSyncDates = dates
+    }
+
+    private func refreshStatus() {
+        scheduleIsLoaded = LaunchAgentScheduler.isLoaded()
+        refreshLastSyncDates()
     }
 
     private func addMapping() {
@@ -247,6 +301,7 @@ struct EmailSyncView: View {
         do {
             try ConfigurationStore.save(configuration)
             try LaunchAgentScheduler.update(enabled: configuration.scheduleEnabled, frequency: configuration.frequency)
+            scheduleIsLoaded = LaunchAgentScheduler.isLoaded()
             statusMessage = configuration.scheduleEnabled ? "Settings saved · schedule active" : "Settings saved · schedule off"
         } catch {
             statusMessage = error.localizedDescription
@@ -262,6 +317,7 @@ struct EmailSyncView: View {
                 DispatchQueue.main.async {
                     isRunning = false
                     statusMessage = "Export complete"
+                    refreshLastSyncDates()
                 }
             } catch {
                 DispatchQueue.main.async {

@@ -10,6 +10,7 @@ struct TimecardEntry: Identifiable, Equatable, Sendable {
     let kind: TimecardEntryKind
     let title: String
     let date: Date
+    var assignmentKey: String? = nil
     var minutes: Int
     var project: String?
     var excluded = false
@@ -21,23 +22,79 @@ struct TimecardEntry: Identifiable, Equatable, Sendable {
     }
 }
 
+struct TimecardDayNotes: Identifiable, Sendable {
+    let date: Date
+    let text: String
+
+    var id: Date { date }
+}
+
 enum TimecardReport {
+    static func weekStartDates(from start: Date, through end: Date) -> [Date] {
+        let calendar = reportCalendar()
+        let startDay = calendar.startOfDay(for: start)
+        let endDay = calendar.startOfDay(for: end)
+        guard startDay <= endDay else { return [] }
+
+        var weeks: [Date] = []
+        var cursor = calendar.dateInterval(of: .weekOfYear, for: startDay)?.start ?? startDay
+        while cursor <= endDay {
+            weeks.append(cursor)
+            guard let nextWeek = calendar.date(byAdding: .day, value: 7, to: cursor) else { break }
+            cursor = nextWeek
+        }
+        return weeks
+    }
+
+    static func weekDays(starting weekStart: Date) -> [Date] {
+        let calendar = reportCalendar()
+        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: weekStart) }
+    }
+
+    static func dayHeading(_ date: Date) -> String {
+        let weekday = date.formatted(.dateTime.weekday(.wide))
+        let dayAndMonth = date.formatted(.dateTime.day().month(.twoDigits))
+        return "\(weekday) \(dayAndMonth)"
+    }
+
+    static func dailyMinutes(entries: [TimecardEntry], project: String, day: Date) -> Int {
+        let calendar = reportCalendar()
+        return entries
+            .filter { !$0.excluded && $0.project == project && calendar.isDate($0.date, inSameDayAs: day) }
+            .reduce(0) { $0 + $1.reportMinutes }
+    }
+
+    static func weeklyMinutes(entries: [TimecardEntry], project: String, weekStart: Date) -> Int {
+        weekDays(starting: weekStart).reduce(0) {
+            $0 + dailyMinutes(entries: entries, project: project, day: $1)
+        }
+    }
+
+    static func dailyNotes(entries: [TimecardEntry], project: String, weekStart: Date) -> [TimecardDayNotes] {
+        let calendar = reportCalendar()
+        return weekDays(starting: weekStart).map { day in
+            let matching = entries.filter {
+                !$0.excluded && $0.project == project && calendar.isDate($0.date, inSameDayAs: day)
+            }
+            let eventNotes = matching.filter { $0.kind == .calendar }.map {
+                "- \($0.title) (\($0.reportMinutes) min)"
+            }
+            let emailGroups = Dictionary(grouping: matching.filter { $0.kind == .email }, by: \.title)
+            let emailNotes = emailGroups.keys.sorted().map { subject in
+                let minutes = emailGroups[subject, default: []].reduce(0) { $0 + $1.reportMinutes }
+                let displaySubject = subject.isEmpty ? "(No subject)" : subject
+                return "- Email: \(displaySubject) (\(minutes) min)"
+            }
+            let notes = eventNotes + emailNotes
+            return TimecardDayNotes(date: day, text: notes.isEmpty ? "No notes for this day." : notes.joined(separator: "\n"))
+        }
+    }
+
     static func make(entries: [TimecardEntry], projects: [String], start: Date, end: Date) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         calendar.firstWeekday = 1
         calendar.minimumDaysInFirstWeek = 1
-
-        let startDay = calendar.startOfDay(for: start)
-        let endDay = calendar.startOfDay(for: end)
-        let eligibleEntries = entries.filter { !$0.excluded && $0.project != nil }
-        var weekStarts: [Date] = []
-        var weekCursor = calendar.dateInterval(of: .weekOfYear, for: startDay)?.start ?? startDay
-        while weekCursor <= endDay {
-            weekStarts.append(weekCursor)
-            guard let nextWeek = calendar.date(byAdding: .day, value: 7, to: weekCursor) else { break }
-            weekCursor = nextWeek
-        }
 
         let dateFormatter = DateFormatter()
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -49,10 +106,8 @@ enum TimecardReport {
         dayFormatter.dateFormat = "EEEE"
 
         var sections: [String] = []
-        for weekStart in weekStarts {
+        for weekStart in weekStartDates(from: start, through: end) {
             guard let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) else { continue }
-            let weekAfterEnd = calendar.date(byAdding: .day, value: 1, to: weekEnd) ?? weekEnd
-            let weekEntries = eligibleEntries.filter { $0.date >= weekStart && $0.date < weekAfterEnd }
             var lines = [
                 "Week Start: \(dateFormatter.string(from: weekStart))",
                 "Week End: \(dateFormatter.string(from: weekEnd))",
@@ -65,33 +120,21 @@ enum TimecardReport {
                 var weeklyMinutes = 0
                 for dayOffset in 0..<7 {
                     guard let day = calendar.date(byAdding: .day, value: dayOffset, to: weekStart) else { continue }
-                    let minutes = weekEntries
-                        .filter { $0.project == project && calendar.isDate($0.date, inSameDayAs: day) }
-                        .reduce(0) { $0 + $1.reportMinutes }
+                    let minutes = dailyMinutes(entries: entries, project: project, day: day)
                     weeklyMinutes += minutes
-                    lines.append("\(dayFormatter.string(from: day)) Hours: \(hours(minutes))")
+                    lines.append("\(dayFormatter.string(from: day)) Hours: \(hoursText(minutes))")
                 }
-                lines.append("Weekly total: \(hours(weeklyMinutes))")
+                lines.append("Weekly total: \(hoursText(weeklyMinutes))")
                 lines.append("")
             }
 
             lines.append("Daily notes:")
             for project in projects {
                 lines.append(project)
-                for dayOffset in 0..<7 {
-                    guard let day = calendar.date(byAdding: .day, value: dayOffset, to: weekStart) else { continue }
-                    lines.append("\(dayFormatter.string(from: day)) notes:")
-                    let dayEntries = weekEntries.filter {
-                        $0.project == project && calendar.isDate($0.date, inSameDayAs: day)
-                    }
-                    let calendarEntries = dayEntries.filter { $0.kind == .calendar }
-                    for entry in calendarEntries {
-                        lines.append("- \(entry.title) (\(entry.reportMinutes) min)")
-                    }
-                    let emailGroups = Dictionary(grouping: dayEntries.filter { $0.kind == .email }, by: \.title)
-                    for subject in emailGroups.keys.sorted() {
-                        let minutes = emailGroups[subject, default: []].reduce(0) { $0 + $1.reportMinutes }
-                        lines.append("- Email: \(subject) (\(minutes) min)")
+                for dayNotes in dailyNotes(entries: entries, project: project, weekStart: weekStart) {
+                    lines.append("\(dayFormatter.string(from: dayNotes.date)) notes:")
+                    if dayNotes.text != "No notes for this day." {
+                        lines.append(contentsOf: dayNotes.text.components(separatedBy: "\n"))
                     }
                 }
                 lines.append("")
@@ -108,9 +151,17 @@ enum TimecardReport {
         return "\(formatter.string(from: start)) to \(formatter.string(from: end))-timecards report.txt"
     }
 
-    private static func hours(_ minutes: Int) -> String {
+    static func hoursText(_ minutes: Int) -> String {
         let value = Double(minutes) / 60
         return String(format: "%.2f", value).replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+    }
+
+    private static func reportCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        calendar.firstWeekday = 1
+        calendar.minimumDaysInFirstWeek = 1
+        return calendar
     }
 }

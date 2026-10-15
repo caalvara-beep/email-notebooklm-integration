@@ -27,6 +27,7 @@ final class TimecardDataService: ObservableObject {
                     kind: .calendar,
                     title: event.title ?? "Untitled event",
                     date: event.startDate,
+                    assignmentKey: event.calendarItemIdentifier,
                     minutes: max(0, Int((event.endDate.timeIntervalSince(event.startDate) / 60).rounded())),
                     project: nil
                 )
