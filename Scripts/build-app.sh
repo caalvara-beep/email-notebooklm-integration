@@ -27,4 +27,6 @@ PLIST="$CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :NSCalendarsFullAccessUsageDescription string Email to NotebookLM reads calendar events to prepare timecard reports." "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.productivity" "$PLIST"
 
+codesign --force --deep --sign - --identifier com.caalvara.emailnotebooklmintegration "$APP_DIR"
+
 printf 'Created %s\n' "$APP_DIR"
